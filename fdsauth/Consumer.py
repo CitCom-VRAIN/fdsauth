@@ -1,198 +1,219 @@
-import base64
-import json
+import os
 import requests
-import subprocess
+import json
+import logging
+from base64 import urlsafe_b64encode
+from subprocess import run, CalledProcessError
+from tenacity import retry, stop_after_attempt, wait_fixed
+from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class Consumer:
     def __init__(
         self,
-        keycloak_url,
-        data_service_url,
-        realm,
-        client_id,
-        username,
-        password,
-        credential_configuration_id,
-        credential_identifier,
-        private_key_path,
-        did_path,
+        protocol: str,
+        keycloak_endpoint: str,
+        keycloak_realm_path: str,
+        keycloak_user_name: str,
+        keycloak_user_password: str,
+        gateway_endpoint: str,
+        certs_path: str,
     ):
-        self.keycloak_url = keycloak_url
-        self.data_service_url = data_service_url
-        self.realm = realm
-        self.client_id = client_id
-        self.username = username
-        self.password = password
-        self.credential_configuration_id = credential_configuration_id
-        self.credential_identifier = credential_identifier
-        self.private_key_path = private_key_path
-        self.did_path = did_path
-        self._access_token = None
-        self._credential_access_token = None
-        self.holder_did = None
-        self.verifiable_credential = None
-        self.token_endpoint = None
-        self.verifiable_presentation = None
-        self.jwt = None
-        self.vp_token = None
+        self.protocol = protocol
+        self.keycloak_endpoint = keycloak_endpoint
+        self.keycloak_realm_path = keycloak_realm_path
+        self.keycloak_user_name = keycloak_user_name
+        self.keycloak_user_password = keycloak_user_password
+        self.gateway_endpoint = gateway_endpoint
+        self.certs_path = certs_path
 
-    @property
-    def access_token(self):
-        if not self._access_token:
-            self._access_token = self._get_access_token()
-        return self._access_token
+        self.access_token: Optional[str] = None
+        self.offer_uri: Optional[str] = None
+        self.pre_authorized_code: Optional[str] = None
+        self.credential_access_token: Optional[str] = None
+        self.verifiable_credential: Optional[str] = None
+        self.holder_did: Optional[str] = None
+        self.jwt: Optional[str] = None
+        self.vp_token: Optional[str] = None
+        self.data_service_access_token: Optional[str] = None
 
-    def _get_access_token(self):
-        """Retrieve access token from Keycloak."""
-        url = f"{self.keycloak_url}/realms/{self.realm}/protocol/openid-connect/token"
-        headers = {"Accept": "*/*", "Content-Type": "application/x-www-form-urlencoded"}
+        self.session = requests.Session()
+
+    def _construct_url(self, path: str) -> str:
+        return f"{self.protocol}://{self.keycloak_endpoint}/{self.keycloak_realm_path}/{path}"
+
+    def _post_request(
+        self, url: str, data: Dict[str, Any], headers: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        try:
+            response = self.session.post(url, data=data, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"POST request to {url} failed: {e}")
+            raise
+
+    def _get_request(
+        self, url: str, headers: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        try:
+            response = self.session.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"GET request to {url} failed: {e}")
+            raise
+
+    def get_access_token(self) -> str:
+        """Obtain an access token from Keycloak."""
+        url = self._construct_url("openid-connect/token")
         data = {
             "grant_type": "password",
-            "client_id": self.client_id,
-            "username": self.username,
-            "password": self.password,
+            "client_id": "admin-cli",
+            "username": self.keycloak_user_name,
+            "password": self.keycloak_user_password,
         }
-        response = requests.post(url, headers=headers, data=data)
-        response.raise_for_status()
-        return response.json()["access_token"]
+        logger.info("Requesting access token from Keycloak")
+        response_data = self._post_request(url, data)
+        self.access_token = response_data.get("access_token")
+        return self.access_token
 
-    @property
-    def offer_uri(self):
-        """Retrieve the offer URI for credential configuration."""
-        url = f"{self.keycloak_url}/realms/{self.realm}/protocol/oid4vc/credential-offer-uri"
-        params = {"credential_configuration_id": self.credential_configuration_id}
+    def get_offer_uri(self) -> str:
+        """Fetch the offer URI for a user credential."""
+        url = self._construct_url(
+            "oid4vc/credential-offer-uri?credential_configuration_id=user-credential"
+        )
         headers = {"Authorization": f"Bearer {self.access_token}"}
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        data = response.json()
-        return f"{data['issuer']}{data['nonce']}"
+        logger.info("Fetching offer URI")
+        offer_data = self._get_request(url, headers)
+        self.offer_uri = f"{offer_data.get('issuer')}{offer_data.get('nonce')}"
+        return self.offer_uri
 
-    @property
-    def pre_authorized_code(self):
-        """Retrieve the pre-authorized code using the offer URI."""
+    def get_pre_authorized_code(self) -> str:
+        """Retrieve a pre-authorized code from the offer URI."""
         headers = {"Authorization": f"Bearer {self.access_token}"}
-        response = requests.get(self.offer_uri, headers=headers)
-        response.raise_for_status()
-        return response.json()["grants"][
-            "urn:ietf:params:oauth:grant-type:pre-authorized_code"
-        ]["pre-authorized_code"]
+        logger.info("Retrieving pre-authorized code")
+        grants = self._get_request(self.offer_uri, headers).get("grants", {})
+        self.pre_authorized_code = grants.get(
+            "urn:ietf:params:oauth:grant-type:pre-authorized_code", {}
+        ).get("pre-authorized_code")
+        return self.pre_authorized_code
 
-    @property
-    def credential_access_token(self):
-        """Retrieve the credential access token."""
-        if not self._credential_access_token:
-            self._credential_access_token = self._get_credential_access_token()
-        return self._credential_access_token
-
-    def _get_credential_access_token(self):
-        """Exchange pre-authorized code for credential access token."""
-        url = f"{self.keycloak_url}/realms/{self.realm}/protocol/openid-connect/token"
-        headers = {"Accept": "*/*", "Content-Type": "application/x-www-form-urlencoded"}
+    def get_credential_access_token(self) -> str:
+        """Obtain a credential access token using the pre-authorized code."""
+        url = self._construct_url("openid-connect/token")
         data = {
             "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
-            "code": self.pre_authorized_code,
+            "pre-authorized_code": self.pre_authorized_code,
         }
-        response = requests.post(url, headers=headers, data=data)
-        response.raise_for_status()
-        return response.json()["access_token"]
+        logger.info("Requesting credential access token")
+        response_data = self._post_request(url, data)
+        self.credential_access_token = response_data.get("access_token")
+        return self.credential_access_token
 
-    def get_verifiable_credential(self):
-        """Retrieve the verifiable credential."""
-        url = f"{self.keycloak_url}/realms/{self.realm}/protocol/oid4vc/credential"
+    def get_verifiable_credential(self) -> str:
+        """Fetch the verifiable credential in JWT format."""
+        url = self._construct_url("oid4vc/credential")
         headers = {
             "Accept": "*/*",
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.credential_access_token}",
         }
         data = json.dumps(
-            {"credential_identifier": self.credential_identifier, "format": "jwt_vc"}
+            {"credential_identifier": "user-credential", "format": "jwt_vc"}
         )
-        response = requests.post(url, headers=headers, data=data)
-        response.raise_for_status()
-        self.verifiable_credential = response.json()["credential"]
+        logger.info("Fetching verifiable credential")
+        response_data = self._post_request(url, data, headers)
+        self.verifiable_credential = response_data.get("credential")
         return self.verifiable_credential
 
-    def get_token_endpoint(self):
-        """Retrieve the token endpoint from the data service."""
-        url = f"{self.data_service_url}/.well-known/openid-configuration"
-        response = requests.get(url)
-        response.raise_for_status()
-        self.token_endpoint = response.json()["token_endpoint"]
-        return self.token_endpoint
+    def encode_vp_token(self) -> str:
+        """Create a VP token from the verifiable credential."""
+        self._ensure_certs_path_exists()
+        self._load_holder_did()
 
-    def run_did_helper(self):
-        with open(self.did_path, "r") as f:
-            did_data = json.load(f)
-        self.holder_did = did_data["id"]
-        return self.holder_did
-
-    def create_jwt_header(self):
-        """Create the JWT header."""
-        header = json.dumps({"alg": "ES256", "typ": "JWT", "kid": self.holder_did})
-        return base64.urlsafe_b64encode(header.encode()).decode().rstrip("=")
-
-    def create_payload(self):
-        """Create the JWT payload."""
-        payload = json.dumps(
-            {
-                "iss": self.holder_did,
-                "sub": self.holder_did,
-                "vp": self.verifiable_presentation,
-            }
-        )
-        return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
-
-    def sign_jwt(self, header, payload):
-        """Sign the JWT using the private key."""
-        message = f"{header}.{payload}"
-        process = subprocess.run(
-            ["openssl", "dgst", "-sha256", "-binary", "-sign", self.private_key_path],
-            input=message.encode(),
-            stdout=subprocess.PIPE,
-            check=True,
-        )
-        return base64.urlsafe_b64encode(process.stdout).decode().rstrip("=")
-
-    def get_vp_token(self):
-        """Get the Verifiable Presentation (VP) token."""
-        return base64.urlsafe_b64encode(self.jwt.encode()).decode().rstrip("=")
-
-    def get_data_service_access_token(self):
-        """Retrieve the data service access token using the VP token."""
-        headers = {"Accept": "*/*", "Content-Type": "application/x-www-form-urlencoded"}
-        data = {"grant_type": "vp_token", "vp_token": self.vp_token, "scope": "default"}
-        response = requests.post(self.token_endpoint, headers=headers, data=data)
-        response.raise_for_status()
-        self.data_service_access_token = response.json()["access_token"]
-        return response.json()["access_token"]
-
-    def create_verifiable_presentation(self):
-        """Create the verifiable presentation."""
-        self.verifiable_presentation = {
+        presentation = {
             "@context": ["https://www.w3.org/2018/credentials/v1"],
             "type": ["VerifiablePresentation"],
             "verifiableCredential": [self.verifiable_credential],
             "holder": self.holder_did,
         }
-        return self.verifiable_presentation
 
-    def generate_jwt(self):
-        """Generate the JWT."""
-        header = self.create_jwt_header()
-        payload = self.create_payload()
-        signature = self.sign_jwt(header, payload)
-        self.jwt = f"{header}.{payload}.{signature}"
-        return self.jwt
+        jwt_header = self._encode_json(
+            {"alg": "ES256", "typ": "JWT", "kid": self.holder_did}
+        )
+        payload = self._encode_json(
+            {"iss": self.holder_did, "sub": self.holder_did, "vp": presentation}
+        )
+        data_to_sign = f"{jwt_header}.{payload}"
 
-    def get_auth_token(self):
-        """Execute the main process flow."""
-        self.get_verifiable_credential()
-        self.get_token_endpoint()
-        self.run_did_helper()
-        self.create_verifiable_presentation()
-        self.generate_jwt()
-        self.vp_token = self.get_vp_token()
-        self.get_data_service_access_token()
+        signature = self._sign_data(data_to_sign)
+        signature_b64 = urlsafe_b64encode(signature).decode().rstrip("=")
+        self.jwt = f"{jwt_header}.{payload}.{signature_b64}"
+        self.vp_token = urlsafe_b64encode(self.jwt.encode()).decode().rstrip("=")
+        return self.vp_token
 
-        return self.data_service_access_token
+    def _ensure_certs_path_exists(self) -> None:
+        if not os.path.exists(self.certs_path):
+            os.makedirs(self.certs_path, exist_ok=True)
+            try:
+                run(
+                    [
+                        "docker",
+                        "run",
+                        "-v",
+                        f"{os.getcwd()}/{self.certs_path}:/cert",
+                        "quay.io/wi_stefan/did-helper:0.1.1",
+                    ],
+                    check=True,
+                )
+            except CalledProcessError:
+                logger.error("Failed to generate certificates.")
+                raise RuntimeError("Failed to generate certificates.")
+            os.chmod(f"{self.certs_path}/private-key.pem", 0o644)
+
+    def _load_holder_did(self) -> None:
+        try:
+            with open(f"{self.certs_path}/did.json", "r") as f:
+                self.holder_did = json.load(f).get("id")
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to read holder DID: {e}")
+            raise
+
+    def _encode_json(self, data: Dict[str, Any]) -> str:
+        return urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+
+    def _sign_data(self, data: str) -> bytes:
+        return run(
+            [
+                "openssl",
+                "dgst",
+                "-sha256",
+                "-binary",
+                "-sign",
+                f"{self.certs_path}/private-key.pem",
+            ],
+            input=data.encode(),
+            capture_output=True,
+            check=True,
+        ).stdout
+
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+    def get_data_service_access_token(self) -> str:
+        """Fetch a data service access token using the VP token."""
+        url = f"{self.protocol}://{self.gateway_endpoint}/.well-known/openid-configuration"
+        logger.info("Fetching data service access token")
+        token_endpoint = self._get_request(url).get("token_endpoint")
+
+        data = {"grant_type": "vp_token", "vp_token": self.vp_token, "scope": "default"}
+        try:
+            response_data = self._post_request(token_endpoint, data)
+            self.data_service_access_token = response_data.get("access_token")
+            return self.data_service_access_token
+        except requests.exceptions.HTTPError as e:
+            logger.error(
+                f"Failed to fetch data service access token: {e.response.text}"
+            )
+            raise
