@@ -15,5 +15,5 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/CitCom-VRAIN/fdsauth",
     packages=find_packages(),
-    install_requires=["requests"],
+    install_requires=["requests", "tenacity"],
 )
