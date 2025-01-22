@@ -1,15 +1,13 @@
 import os
-import requests
 import json
 import logging
 from base64 import urlsafe_b64encode
-from tenacity import retry, stop_after_attempt, wait_fixed
 from typing import Optional, Dict, Any
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
-
+from fdsauth.http_client import post_request, get_request
 
 logger = logging.getLogger(__name__)
 
@@ -43,32 +41,8 @@ class Consumer:
         self.vp_token: Optional[str] = None
         self.data_service_access_token: Optional[str] = None
 
-        self.session = requests.Session()
-
     def _construct_url(self, path: str) -> str:
         return f"{self.protocol}://{self.keycloak_endpoint}/{self.keycloak_realm_path}/{path}"
-
-    def _post_request(
-        self, url: str, data: Dict[str, Any], headers: Optional[Dict[str, str]] = None
-    ) -> Dict[str, Any]:
-        try:
-            response = self.session.post(url, data=data, headers=headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            logger.error(f"POST request to {url} failed: {e}")
-            raise
-
-    def _get_request(
-        self, url: str, headers: Optional[Dict[str, str]] = None
-    ) -> Dict[str, Any]:
-        try:
-            response = self.session.get(url, headers=headers)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            logger.error(f"GET request to {url} failed: {e}")
-            raise
 
     def get_access_token(self) -> str:
         """Obtain an access token from Keycloak."""
@@ -80,7 +54,7 @@ class Consumer:
             "password": self.keycloak_user_password,
         }
         logger.info("Requesting access token from Keycloak")
-        response_data = self._post_request(url, data)
+        response_data = post_request(url, data)
         self.access_token = response_data.get("access_token")
         return self.access_token
 
@@ -91,7 +65,7 @@ class Consumer:
         )
         headers = {"Authorization": f"Bearer {self.access_token}"}
         logger.info("Fetching offer URI")
-        offer_data = self._get_request(url, headers)
+        offer_data = get_request(url, headers)
         self.offer_uri = f"{offer_data.get('issuer')}{offer_data.get('nonce')}"
         return self.offer_uri
 
@@ -99,7 +73,7 @@ class Consumer:
         """Retrieve a pre-authorized code from the offer URI."""
         headers = {"Authorization": f"Bearer {self.access_token}"}
         logger.info("Retrieving pre-authorized code")
-        grants = self._get_request(self.offer_uri, headers).get("grants", {})
+        grants = get_request(self.offer_uri, headers).get("grants", {})
         self.pre_authorized_code = grants.get(
             "urn:ietf:params:oauth:grant-type:pre-authorized_code", {}
         ).get("pre-authorized_code")
@@ -113,7 +87,7 @@ class Consumer:
             "pre-authorized_code": self.pre_authorized_code,
         }
         logger.info("Requesting credential access token")
-        response_data = self._post_request(url, data)
+        response_data = post_request(url, data)
         self.credential_access_token = response_data.get("access_token")
         return self.credential_access_token
 
@@ -129,7 +103,7 @@ class Consumer:
             {"credential_identifier": "user-credential", "format": "jwt_vc"}
         )
         logger.info("Fetching verifiable credential")
-        response_data = self._post_request(url, data, headers)
+        response_data = post_request(url, data, headers)
         self.verifiable_credential = response_data.get("credential")
         return self.verifiable_credential
 
@@ -161,7 +135,9 @@ class Consumer:
 
     def _ensure_certs_path_exists(self) -> None:
         if not os.path.exists(self.certs_path):
-            raise FileNotFoundError(f"Certificate path {self.certs_path} does not exist")
+            raise FileNotFoundError(
+                f"Certificate path {self.certs_path} does not exist"
+            )
 
     def _load_holder_did(self) -> None:
         try:
@@ -177,33 +153,23 @@ class Consumer:
     def _sign_data(self, data: str) -> bytes:
         with open(f"{self.certs_path}/private-key.pem", "rb") as key_file:
             private_key = load_pem_private_key(key_file.read(), password=None)
-        
+
         # Hash the data
         digest = hashes.Hash(hashes.SHA256())
         digest.update(data.encode())
         hashed_data = digest.finalize()
-        
+
         # Sign the hashed data
-        signature = private_key.sign(
-            hashed_data,
-            ec.ECDSA(Prehashed(hashes.SHA256()))
-        )
+        signature = private_key.sign(hashed_data, ec.ECDSA(Prehashed(hashes.SHA256())))
         return signature
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def get_data_service_access_token(self) -> str:
         """Fetch a data service access token using the VP token."""
         url = f"{self.protocol}://{self.gateway_endpoint}/.well-known/openid-configuration"
         logger.info("Fetching data service access token")
-        token_endpoint = self._get_request(url).get("token_endpoint")
+        token_endpoint = get_request(url).get("token_endpoint")
 
         data = {"grant_type": "vp_token", "vp_token": self.vp_token, "scope": "default"}
-        try:
-            response_data = self._post_request(token_endpoint, data)
-            self.data_service_access_token = response_data.get("access_token")
-            return self.data_service_access_token
-        except requests.exceptions.HTTPError as e:
-            logger.error(
-                f"Failed to fetch data service access token: {e.response.text}"
-            )
-            raise
+        response_data = post_request(token_endpoint, data)
+        self.data_service_access_token = response_data.get("access_token")
+        return self.data_service_access_token
