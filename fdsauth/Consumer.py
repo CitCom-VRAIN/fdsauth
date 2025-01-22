@@ -3,9 +3,13 @@ import requests
 import json
 import logging
 from base64 import urlsafe_b64encode
-from subprocess import run, CalledProcessError
 from tenacity import retry, stop_after_attempt, wait_fixed
 from typing import Optional, Dict, Any
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
+
 
 logger = logging.getLogger(__name__)
 
@@ -157,22 +161,7 @@ class Consumer:
 
     def _ensure_certs_path_exists(self) -> None:
         if not os.path.exists(self.certs_path):
-            os.makedirs(self.certs_path, exist_ok=True)
-            try:
-                run(
-                    [
-                        "docker",
-                        "run",
-                        "-v",
-                        f"{os.getcwd()}/{self.certs_path}:/cert",
-                        "quay.io/wi_stefan/did-helper:0.1.1",
-                    ],
-                    check=True,
-                )
-            except CalledProcessError:
-                logger.error("Failed to generate certificates.")
-                raise RuntimeError("Failed to generate certificates.")
-            os.chmod(f"{self.certs_path}/private-key.pem", 0o644)
+            raise FileNotFoundError(f"Certificate path {self.certs_path} does not exist")
 
     def _load_holder_did(self) -> None:
         try:
@@ -186,19 +175,20 @@ class Consumer:
         return urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
 
     def _sign_data(self, data: str) -> bytes:
-        return run(
-            [
-                "openssl",
-                "dgst",
-                "-sha256",
-                "-binary",
-                "-sign",
-                f"{self.certs_path}/private-key.pem",
-            ],
-            input=data.encode(),
-            capture_output=True,
-            check=True,
-        ).stdout
+        with open(f"{self.certs_path}/private-key.pem", "rb") as key_file:
+            private_key = load_pem_private_key(key_file.read(), password=None)
+        
+        # Hash the data
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(data.encode())
+        hashed_data = digest.finalize()
+        
+        # Sign the hashed data
+        signature = private_key.sign(
+            hashed_data,
+            ec.ECDSA(Prehashed(hashes.SHA256()))
+        )
+        return signature
 
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
     def get_data_service_access_token(self) -> str:
