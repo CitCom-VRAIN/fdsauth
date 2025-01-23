@@ -1,8 +1,8 @@
-# Python Authentication for FIWARE Data Space (FDSAuth) ![example workflow](https://github.com/CitCom-VRAIN/fdsauth/actions/workflows/package.yml/badge.svg)
-Welcome to the **Python Authentication for FIWARE Data Space** repository. This library, or **FDSAuth**, facilitates seamless FIWARE Data Space framework authentication. With built-in support for various authentication protocols and methods, FDSAuth helps developers implement secure and reliable authentication in their applications, ensuring compliance with FIWARE standards and best practices.
+# Python Authentication for FIWARE Data Space (FDSAuth) ![PyPI - Version](https://img.shields.io/pypi/v/fdsauth) ![package workflow](https://github.com/CitCom-VRAIN/fdsauth/actions/workflows/package.yml/badge.svg)
+**FDSAuth** helps developers implement secure and reliable FIWARE Data Space Connector authentication in their applications.
 
 ## Table of Contents 📚
-- [Python Authentication for FIWARE Data Space (FDSAuth) ](#python-authentication-for-fiware-data-space-fdsauth-)
+- [Python Authentication for FIWARE Data Space (FDSAuth)  ](#python-authentication-for-fiware-data-space-fdsauth--)
   - [Table of Contents 📚](#table-of-contents-)
   - [Installation 🛠️](#installation-️)
   - [Usage  💻](#usage--)
@@ -23,44 +23,34 @@ First a DID (Decentralized Identifier) and the corresponding key-material is req
 mkdir certs && cd certs
 docker run -v $(pwd):/cert quay.io/wi_stefan/did-helper:0.1.1
 ```
-
-Define following environment variables in your `.env` file. Substitute example values for your own:
-```bash
-export KEYCLOAK_URL="http://keycloak-consumer.127.0.0.1.nip.io:8080"
-export DATA_SERVICE_URL="http://mp-data-service.127.0.0.1.nip.io:8080"
-export REALM="test-realm"
-export CLIENT_ID="admin-cli"
-export USERNAME="test-user"
-export PASSWORD="test"
-export CREDENTIAL_CONFIGURATION_ID="user-credential"
-export CREDENTIAL_IDENTIFIER="user-credential"
-export PRIVATE_KEY_PATH="./certs/private-key.pem"
-export DID_PATH="./certs/did.json"
-```
-
 Usage example:
 ```python
-from dotenv import load_dotenv
-from fdsauth import Consumer, Provider
-import os
+from fdsauth import Consumer
+import requests
 
-# Load environment variables from .env file
-load_dotenv()
-
-#Create a Consumer instance and retrieve the auth token
 consumer = Consumer(
-    keycloak_url=os.getenv("KEYCLOAK_URL"),
-    data_service_url=os.getenv("DATA_SERVICE_URL"),
-    realm=os.getenv("REALM"),
-    client_id=os.getenv("CLIENT_ID"),
-    username=os.getenv("USERNAME"),
-    password=os.getenv("PASSWORD"),
-    credential_configuration_id=os.getenv("CREDENTIAL_CONFIGURATION_ID"),
-    credential_identifier=os.getenv("CREDENTIAL_IDENTIFIER"),
-    private_key_path=os.getenv("PRIVATE_KEY_PATH"),
-    did_path=os.getenv("DID_PATH"),
+    keycloak_protocol="http",
+    keycloak_endpoint="keycloak.consumer-a.local",
+    keycloak_realm_path="realms/test-realm/protocol",
+    keycloak_user_name="test-user",
+    keycloak_user_password="test",
+    apisix_protocol="http",
+    apisix_endpoint="apisix-proxy.provider-a.local",
+    certs_path="./certs",
 )
-auth_token = consumer.get_auth_token()
+
+try:
+    # Attempt to access data using the obtained service token. Get entities of type EnergyReport.
+    url = f"http://apisix-proxy.provider-a.local/ngsi-ld/v1/entities?type=EnergyReport"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {consumer.get_data_service_access_token()}",
+    }
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    print(response.json())
+except Exception as req_err:
+    print(f"Request error occurred: {req_err}")
 ```
 
 ## Development 🚀
