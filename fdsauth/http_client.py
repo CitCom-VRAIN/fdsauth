@@ -1,7 +1,10 @@
 import requests
 from tenacity import retry, stop_after_attempt, wait_fixed
 from typing import Any, Dict, Optional
+import logging
 
+# Configure logging
+logger = logging.getLogger(__name__)
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def post_request(
@@ -13,15 +16,13 @@ def post_request(
             response.raise_for_status()
             return response.json()
         except requests.HTTPError as http_err:
-            print(
-                f"HTTP error occurred: {http_err} - Status code: {response.status_code}"
+            logger.error(
+                f"HTTP error occurred: {http_err} - Status code: {response.status_code} - Response: {response.text}"
             )
             raise
-            return {}
-        except requests.RequestException as req_err:
-            print(f"Request error occurred: {req_err}")
-            return {}
-
+        except Exception as err:
+            logger.error(f"An error occurred: {err}")
+            raise
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
 def get_request(url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
@@ -31,11 +32,10 @@ def get_request(url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str,
             response.raise_for_status()
             return response.json()
         except requests.HTTPError as http_err:
-            print(
-                f"HTTP error occurred: {http_err} - Status code: {response.status_code}"
+            logger.error(
+                f"HTTP error occurred: {http_err} - Status code: {response.status_code} - Response: {response.text}"
             )
             raise
-            return {}
-        except requests.RequestException as req_err:
-            print(f"Request error occurred: {req_err}")
-            return {}
+        except Exception as err:
+            logger.error(f"An error occurred: {err}")
+            raise
