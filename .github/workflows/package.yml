@@ -1,5 +1,7 @@
 name: Python Package Build and Publish
-
+permissions:
+  contents: read
+  packages: write
 on:
   push:
     tags:
