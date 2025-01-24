@@ -39,12 +39,14 @@ consumer = Consumer(
     certs_path="./certs",
 )
 
+token = consumer.get_data_service_access_token()
+
 try:
     # Attempt to access data using the obtained service token. Get entities of type EnergyReport.
     url = f"http://apisix-proxy.provider-a.local/ngsi-ld/v1/entities?type=EnergyReport"
     headers = {
         "Accept": "application/json",
-        "Authorization": f"Bearer {consumer.get_data_service_access_token()}",
+        "Authorization": f"Bearer {token}",
     }
     response = requests.get(url, headers=headers)
     response.raise_for_status()
